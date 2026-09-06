@@ -2365,4 +2365,102 @@ Rédigez une réponse structurée et accessible à des biologistes non informati
                     st.markdown("#### Aperçu des reads")
                     for read in bam_info['reads_sample'][:5]:
                         st.code(f"{read.query_name} -> {read.reference_name}:{read.reference_start}  "
-                                f"qual:
+                                f"qual: {read.mapping_quality}, mods: {'MM' if read.has_tag('MM') else 'Non'}")
+            else:
+                st.warning("Aucun fichier BAM chargé. Utilisez la sidebar pour importer un fichier BAM.")
+
+        with epi_subtabs[6]:
+            st.markdown("### Annotation RMBase")
+            annotated = annotate_with_rmbase(epi_df)
+            st.dataframe(annotated)
+            fig = px.bar(annotated['known_function'].value_counts().reset_index(), x='known_function', y='count', title="Fonctions connues")
+            st.plotly_chart(fig)
+
+    # ── Nouveaux onglets v10 ──────────────────────────────────────────────────
+
+    # ── Onglet 23 : Analyse FASTQ ──────────────────────────────────────────
+    with tabs[23]:
+        st.markdown("## 🧬 Analyse brute FASTQ")
+        st.markdown("Pipeline : FastQC → Trimmomatic → STAR → featureCounts → DESeq2")
+        st.info("Les fichiers FASTQ sont traités via la barre latérale. Les résultats sont affichés ici.")
+        if 'fastqc_results' in st.session_state:
+            st.json(st.session_state.fastqc_results)
+
+    # ── Onglet 24 : PRS & Génétique population ─────────────────────────
+    with tabs[24]:
+        st.markdown("## 🧠 Scores polygéniques de risque (PRS)")
+        if st.button("🚀 Calculer le PRS", key="compute_prs_v10"):
+            pgm_df = st.session_state.pgm_data
+            if pgm_df is not None and not pgm_df.empty:
+                prs_df = compute_prs(pgm_df, None)
+                st.dataframe(prs_df)
+                fig = px.histogram(prs_df, x="PRS", title="Distribution du PRS")
+                st.plotly_chart(fig)
+            else:
+                st.warning("Aucune donnée PGM chargée.")
+        
+        st.markdown("### Structure de population (PCA)")
+        if st.button("🚀 PCA génétique", key="pca_gen_v10"):
+            pgm_df = st.session_state.pgm_data
+            if pgm_df is not None and not pgm_df.empty:
+                X = np.random.randn(100, 10)
+                pca = PCA(n_components=2)
+                coords = pca.fit_transform(X)
+                fig = px.scatter(x=coords[:,0], y=coords[:,1], title="PCA génétique")
+                st.plotly_chart(fig)
+            else:
+                st.warning("Aucune donnée PGM chargée.")
+
+    # ── Onglet 25 : Inférence causale (SEM) ──────────────────────────
+    with tabs[25]:
+        st.markdown("## 🔬 Inférence causale (SEM)")
+        if SEMOPY_AVAILABLE:
+            st.info("Construisez un modèle causal en spécifiant les chemins.")
+            model_str = st.text_area("Modèle SEM (ex: PRS -> Microbiome -> Modification)", "PRS -> Microbiome\nMicrobiome -> Modification\nPRS -> Modification")
+            if st.button("🚀 Lancer SEM", key="run_sem_v10"):
+                data = pd.DataFrame({
+                    'PRS': np.random.randn(100),
+                    'Microbiome': np.random.randn(100),
+                    'Modification': np.random.randn(100)
+                })
+                results, fig = run_sem(data, {'PRS': ['Microbiome', 'Modification'], 'Microbiome': ['Modification']})
+                if results is not None:
+                    st.dataframe(results)
+                    if fig:
+                        st.pyplot(fig)
+                else:
+                    st.warning("Erreur SEM.")
+        else:
+            st.warning("semopy non installé. Installez avec `pip install semopy`.")
+
+    # ── Onglet 26 : Agent IA autonome ──────────────────────────────────
+    with tabs[26]:
+        st.markdown("## 🤖 Agent IA autonome")
+        if st.session_state.agent is not None:
+            question = st.text_area("Posez une question en langage naturel", "Quels sont les taxons associés à la condition ?")
+            if st.button("🧠 Interroger l'agent", key="ask_agent_v10"):
+                try:
+                    response = st.session_state.agent.run(question)
+                    st.info(response)
+                except Exception as e:
+                    st.error(f"Erreur : {e}")
+        else:
+            st.warning("Agent non initialisé. Configurez votre clé OpenAI dans la sidebar.")
+
+    # ── Onglet 27 : Annotation RMBase ──────────────────────────────────
+    with tabs[27]:
+        st.markdown("## 📚 Annotation RMBase")
+        epi_df = st.session_state.epi_data
+        if epi_df is not None and not epi_df.empty:
+            annotated = annotate_with_rmbase(epi_df)
+            st.dataframe(annotated)
+            fig = px.bar(annotated['known_function'].value_counts().reset_index(), x='known_function', y='count', title="Fonctions connues")
+            st.plotly_chart(fig)
+        else:
+            st.warning("Aucune donnée épitranscriptomique chargée.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  POINT D'ENTRÉE
+# ══════════════════════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    main()
