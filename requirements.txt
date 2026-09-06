@@ -21,7 +21,9 @@ semopy>=2.3.0
 langchain>=0.2.0
 langchain-openai>=0.1.0
 pydeseq2>=0.4.0
+
+# Optionnelles (peuvent échouer sur certains environnements)
 rpy2>=3.5.0
 
-# Optionnels (pour l'analyse FASTQ)
-# fastqc, trimmomatic, star, featurecounts sont des outils système
+# Outils système (non installables via pip)
+# fastqc, trimmomatic, star, featurecounts
