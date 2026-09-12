@@ -1,6 +1,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # MetaInsight v10 — Édition ZOOTECHNIE & MORPHOMÉTRIE
 # Application autonome pour l'analyse morphométrique animale
+# Version corrigée : support complet pyarrow + format européen
 # ══════════════════════════════════════════════════════════════════════════════
 
 import streamlit as st
@@ -70,10 +71,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  LECTURE CSV ROBUSTE (format européen)
+#  LECTURE CSV ROBUSTE (CORRIGÉE pour pyarrow)
 # ══════════════════════════════════════════════════════════════════════════════
 def read_any_csv(uploaded_file):
-    """Lit un CSV avec détection auto du séparateur, encodage et décimales."""
+    """
+    Lit un CSV avec détection auto du séparateur, encodage et décimales.
+    CORRECTION : force le backend numpy au lieu de pyarrow.
+    """
     try:
         content = uploaded_file.read()
         try:
@@ -81,19 +85,29 @@ def read_any_csv(uploaded_file):
         except UnicodeDecodeError:
             text = content.decode('latin-1')
 
+        # Détection du séparateur
         first_line = text.split('\n')[0]
         counts = {',': first_line.count(','), ';': first_line.count(';'), '\t': first_line.count('\t')}
         sep = max(counts, key=counts.get)
         if counts[sep] == 0:
             sep = ','
 
-        df = pd.read_csv(io.StringIO(text), sep=sep)
+        # CORRECTION 1 : forcer le backend numpy (pas Arrow)
+        df = pd.read_csv(io.StringIO(text), sep=sep, dtype_backend='numpy_nullable')
 
-        # Conversion décimales européennes
+        # Conversion des décimales européennes
         for col in df.columns:
             if df[col].dtype == 'object':
                 try:
                     df[col] = df[col].astype(str).str.replace(',', '.').astype(float)
+                except (ValueError, TypeError):
+                    pass
+
+        # CORRECTION 2 CRITIQUE : forcer les colonnes numériques en float64 numpy
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                try:
+                    df[col] = df[col].astype('float64')
                 except (ValueError, TypeError):
                     pass
 
@@ -261,7 +275,7 @@ def main():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # ── SIDEBAR SIMPLIFIÉE ───────────────────────────────────────────────────
+    # ── SIDEBAR ──────────────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("## 🐕 MetaInsight Zootechnie")
         st.markdown('<span style="font-size:0.75rem;color:#7A8BA8;">Analyse morphométrique</span>',
@@ -337,7 +351,7 @@ def main():
 
             st.markdown("---")
             st.markdown("### 📋 Aperçu des données")
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df.head(20), use_container_width=True)
 
             if 'BREED' in df.columns:
                 st.markdown("### 📊 Répartition des races")
@@ -350,7 +364,8 @@ def main():
             if 'BREED' in df.columns and 'SEX' in df.columns:
                 st.markdown("### 📊 Sexe × Race")
                 cross = pd.crosstab(df['BREED'], df['SEX'])
-                fig2 = px.bar(cross, barmode='group', template='plotly_dark')
+                fig2 = px.bar(cross, barmode='group', template='plotly_dark',
+                              title="Sexe × Race")
                 st.plotly_chart(fig2, use_container_width=True, key="accueil_sex_breed")
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -514,7 +529,7 @@ Interprète les différences et leur importance pour la sélection."""
             if len(morpho_cols) < 2:
                 st.warning("Il faut au moins 2 mesures.")
             else:
-                X = df[morpho_cols].fillna(df[morpho_cols].mean()).values
+                X = df[morpho_cols].fillna(df[morpho_cols].mean()).values.astype('float64')
                 X_scaled = StandardScaler().fit_transform(X)
 
                 st.markdown("### 📉 PCA")
@@ -684,7 +699,7 @@ Interprète les différences et leur importance pour la sélection."""
                     try:
                         from statsmodels.formula.api import ols
                         import statsmodels.api as sm
-                        data = df[[p_col, g_col, e_col]].dropna()
+                        data = df[[p_col, g_col, e_col]].dropna().astype('float64')
                         data.columns = ['P', 'G', 'E']
                         if len(data) >= 10:
                             model = ols('P ~ G + E + G:E', data=data).fit()
