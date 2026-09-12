@@ -1,7 +1,6 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # MetaInsight v10 — Édition ZOOTECHNIE & MORPHOMÉTRIE
-# Application autonome pour l'analyse morphométrique animale
-# Version corrigée : support complet pyarrow + format européen
+# Version corrigée DÉFINITIVE : force les types NumPy natifs (pas pyarrow)
 # ══════════════════════════════════════════════════════════════════════════════
 
 import streamlit as st
@@ -71,48 +70,86 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  LECTURE CSV ROBUSTE (CORRIGÉE pour pyarrow)
+#  LECTURE CSV ULTRA-ROBUSTE (solution définitive anti-pyarrow)
 # ══════════════════════════════════════════════════════════════════════════════
 def read_any_csv(uploaded_file):
     """
-    Lit un CSV avec détection auto du séparateur, encodage et décimales.
-    CORRECTION : force le backend numpy au lieu de pyarrow.
+    Lit un CSV en forçant les types NumPy natifs (jamais pyarrow).
+    Détecte le séparateur et les décimales européennes.
     """
     try:
+        # 1. Lire le contenu brut
         content = uploaded_file.read()
         try:
             text = content.decode('utf-8')
         except UnicodeDecodeError:
             text = content.decode('latin-1')
 
-        # Détection du séparateur
+        # 2. Détection du séparateur
         first_line = text.split('\n')[0]
-        counts = {',': first_line.count(','), ';': first_line.count(';'), '\t': first_line.count('\t')}
-        sep = max(counts, key=counts.get)
-        if counts[sep] == 0:
+        if ';' in first_line:
+            sep = ';'
+        elif '\t' in first_line:
+            sep = '\t'
+        else:
             sep = ','
 
-        # CORRECTION 1 : forcer le backend numpy (pas Arrow)
-        df = pd.read_csv(io.StringIO(text), sep=sep, dtype_backend='numpy_nullable')
+        # 3. Lecture en forçant numpy (aucune référence à pyarrow)
+        df = pd.read_csv(
+            io.StringIO(text),
+            sep=sep,
+            engine='python',
+            dtype=None,
+            keep_default_na=True,
+        )
 
-        # Conversion des décimales européennes
+        # 4. Nettoyage des noms de colonnes
+        df.columns = [str(c).strip() for c in df.columns]
+
+        # 5. Conversion colonne par colonne
+        new_cols = {}
         for col in df.columns:
-            if df[col].dtype == 'object':
+            series = df[col].copy()
+            
+            # Si c'est du texte (ID, SEX, BREED)
+            if series.dtype == 'object' or series.dtype.name == 'string':
+                # Essayer de convertir en nombre (colonnes de mesures)
                 try:
-                    df[col] = df[col].astype(str).str.replace(',', '.').astype(float)
+                    numeric_series = series.astype(str).str.replace(',', '.', regex=False)
+                    numeric_series = pd.to_numeric(numeric_series, errors='raise')
+                    # Si ça réussit, c'est une colonne numérique
+                    new_cols[col] = pd.Series(
+                        numeric_series.values, 
+                        dtype='float64', 
+                        index=df.index
+                    )
                 except (ValueError, TypeError):
-                    pass
+                    # Sinon, garder comme texte numpy
+                    new_cols[col] = pd.Series(
+                        series.astype(str).values,
+                        dtype='object',
+                        index=df.index
+                    )
+            # Si c'est déjà numérique
+            elif pd.api.types.is_numeric_dtype(series):
+                new_cols[col] = pd.Series(
+                    np.asarray(series, dtype='float64'),
+                    dtype='float64',
+                    index=df.index
+                )
+            else:
+                new_cols[col] = pd.Series(
+                    series.astype(str).values,
+                    dtype='object',
+                    index=df.index
+                )
 
-        # CORRECTION 2 CRITIQUE : forcer les colonnes numériques en float64 numpy
-        for col in df.columns:
-            if pd.api.types.is_numeric_dtype(df[col]):
-                try:
-                    df[col] = df[col].astype('float64')
-                except (ValueError, TypeError):
-                    pass
+        # 6. Reconstruction finale avec des arrays NumPy purs
+        df = pd.DataFrame(new_cols, index=df.index, copy=False)
 
-        df.columns = df.columns.str.strip()
+        # 7. Suppression des colonnes vides
         df = df.dropna(axis=1, how='all')
+
         return df
     except Exception as e:
         st.error(f"❌ Erreur de lecture : {e}")
@@ -129,27 +166,31 @@ def call_ai(prompt, provider, gemini_key=None, groq_key=None,
             ollama_model="llama3"):
     try:
         if provider == "Gemini (GRATUIT)":
-            if not gemini_key: return "🔑 Clé Gemini manquante."
+            if not gemini_key:
+                return "🔑 Clé Gemini manquante."
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={gemini_key}"
             payload = {"contents": [{"parts": [{"text": prompt}]}]}
             r = requests.post(url, json=payload, timeout=30)
             return r.json()["candidates"][0]["content"]["parts"][0]["text"] if r.status_code == 200 else f"⚠️ {r.status_code}"
         elif provider == "Groq (gratuit)":
-            if not groq_key: return "🔑 Clé Groq manquante."
+            if not groq_key:
+                return "🔑 Clé Groq manquante."
             headers = {"Authorization": f"Bearer {groq_key}"}
             data = {"model": groq_model, "messages": [{"role": "user", "content": prompt}]}
             r = requests.post("https://api.groq.com/openai/v1/chat/completions",
                               json=data, headers=headers, timeout=30)
             return r.json()["choices"][0]["message"]["content"] if r.status_code == 200 else f"⚠️ {r.status_code}"
         elif provider == "OpenRouter — Kimi K2 (gratuit)":
-            if not openrouter_key: return "🔑 Clé OpenRouter manquante."
+            if not openrouter_key:
+                return "🔑 Clé OpenRouter manquante."
             headers = {"Authorization": f"Bearer {openrouter_key}"}
             data = {"model": openrouter_model, "messages": [{"role": "user", "content": prompt}]}
             r = requests.post("https://openrouter.ai/api/v1/chat/completions",
                               json=data, headers=headers, timeout=30)
             return r.json()["choices"][0]["message"]["content"] if r.status_code == 200 else f"⚠️ {r.status_code}"
         elif provider == "DeepSeek (gratuit)":
-            if not deepseek_key: return "🔑 Clé DeepSeek manquante."
+            if not deepseek_key:
+                return "🔑 Clé DeepSeek manquante."
             headers = {"Authorization": f"Bearer {deepseek_key}"}
             data = {"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]}
             r = requests.post("https://api.deepseek.com/v1/chat/completions",
@@ -253,8 +294,8 @@ def compute_allometric_regression(df, x_col, y_col):
     data = data[(data[x_col] > 0) & (data[y_col] > 0)]
     if len(data) < 5:
         return None
-    log_x = np.log(data[x_col].values)
-    log_y = np.log(data[y_col].values)
+    log_x = np.log(data[x_col].values.astype('float64'))
+    log_y = np.log(data[y_col].values.astype('float64'))
     coeffs = np.polyfit(log_x, log_y, 1)
     r = np.corrcoef(log_x, log_y)[0, 1]
     return {'slope': coeffs[0], 'intercept': coeffs[1], 'r': r, 'n': len(data)}
@@ -382,12 +423,23 @@ def main():
 
             if 'BREED' in df.columns:
                 st.markdown("### 🐕 Statistiques par race")
-                breed_stats = df.groupby('BREED')[morpho_cols].agg(['mean', 'std']).round(2)
+                # CORRECTION FINALE : utiliser apply pour éviter pyarrow
+                breed_stats = df.groupby('BREED')[morpho_cols].apply(
+                    lambda x: pd.Series({
+                        'mean': x.mean().mean(),
+                        'std': x.std().mean()
+                    })
+                ).round(2)
                 st.dataframe(breed_stats, use_container_width=True)
 
             if 'SEX' in df.columns:
                 st.markdown("### ♂♀ Statistiques par sexe")
-                sex_stats = df.groupby('SEX')[morpho_cols].agg(['mean', 'std']).round(2)
+                sex_stats = df.groupby('SEX')[morpho_cols].apply(
+                    lambda x: pd.Series({
+                        'mean': x.mean().mean(),
+                        'std': x.std().mean()
+                    })
+                ).round(2)
                 st.dataframe(sex_stats, use_container_width=True)
 
             st.markdown("### 📦 Distribution")
@@ -469,7 +521,7 @@ Interprète les différences et leur importance pour la sélection."""
                 fig_radar = go.Figure()
                 for breed in breed_norm.index:
                     fig_radar.add_trace(go.Scatterpolar(
-                        r=breed_norm.loc[breed].values,
+                        r=breed_norm.loc[breed].values.astype('float64'),
                         theta=[MORPHO_LABELS.get(c, c) for c in morpho_cols],
                         fill='toself', name=breed
                     ))
@@ -529,6 +581,7 @@ Interprète les différences et leur importance pour la sélection."""
             if len(morpho_cols) < 2:
                 st.warning("Il faut au moins 2 mesures.")
             else:
+                # CORRECTION : forcer float64 numpy
                 X = df[morpho_cols].fillna(df[morpho_cols].mean()).values.astype('float64')
                 X_scaled = StandardScaler().fit_transform(X)
 
