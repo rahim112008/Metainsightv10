@@ -1,6 +1,6 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # MetaInsight v10 — Édition ZOOTECHNIE & MORPHOMÉTRIE
-# Version corrigée DÉFINITIVE : force les types NumPy natifs (pas pyarrow)
+# Version ULTIME : 100% NumPy, aucune dépendance pyarrow
 # ══════════════════════════════════════════════════════════════════════════════
 
 import streamlit as st
@@ -14,14 +14,9 @@ import io
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
-from sklearn.cluster import KMeans
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import accuracy_score, silhouette_score
 from scipy.stats import (spearmanr, kruskal, mannwhitneyu, f_oneway,
-                         pearsonr, shapiro, ttest_ind)
+                         pearsonr)
 from scipy.cluster.hierarchy import linkage, dendrogram
-import networkx as nx
 import requests
 import os
 import warnings
@@ -70,22 +65,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  LECTURE CSV ULTRA-ROBUSTE (solution définitive anti-pyarrow)
+#  LECTURE CSV — 100% NumPy purs (jamais pyarrow)
 # ══════════════════════════════════════════════════════════════════════════════
 def read_any_csv(uploaded_file):
-    """
-    Lit un CSV en forçant les types NumPy natifs (jamais pyarrow).
-    Détecte le séparateur et les décimales européennes.
-    """
+    """Lit un CSV en forçant les types NumPy purs (jamais pyarrow)."""
     try:
-        # 1. Lire le contenu brut
         content = uploaded_file.read()
         try:
             text = content.decode('utf-8')
         except UnicodeDecodeError:
             text = content.decode('latin-1')
 
-        # 2. Détection du séparateur
         first_line = text.split('\n')[0]
         if ';' in first_line:
             sep = ';'
@@ -94,63 +84,25 @@ def read_any_csv(uploaded_file):
         else:
             sep = ','
 
-        # 3. Lecture en forçant numpy (aucune référence à pyarrow)
-        df = pd.read_csv(
-            io.StringIO(text),
-            sep=sep,
-            engine='python',
-            dtype=None,
-            keep_default_na=True,
-        )
-
-        # 4. Nettoyage des noms de colonnes
+        df = pd.read_csv(io.StringIO(text), sep=sep)
         df.columns = [str(c).strip() for c in df.columns]
 
-        # 5. Conversion colonne par colonne
-        new_cols = {}
+        # Reconstruction avec arrays numpy purs
+        new_data = {}
         for col in df.columns:
-            series = df[col].copy()
-            
-            # Si c'est du texte (ID, SEX, BREED)
-            if series.dtype == 'object' or series.dtype.name == 'string':
-                # Essayer de convertir en nombre (colonnes de mesures)
-                try:
-                    numeric_series = series.astype(str).str.replace(',', '.', regex=False)
-                    numeric_series = pd.to_numeric(numeric_series, errors='raise')
-                    # Si ça réussit, c'est une colonne numérique
-                    new_cols[col] = pd.Series(
-                        numeric_series.values, 
-                        dtype='float64', 
-                        index=df.index
-                    )
-                except (ValueError, TypeError):
-                    # Sinon, garder comme texte numpy
-                    new_cols[col] = pd.Series(
-                        series.astype(str).values,
-                        dtype='object',
-                        index=df.index
-                    )
-            # Si c'est déjà numérique
-            elif pd.api.types.is_numeric_dtype(series):
-                new_cols[col] = pd.Series(
-                    np.asarray(series, dtype='float64'),
-                    dtype='float64',
-                    index=df.index
+            series = df[col]
+            try:
+                converted = pd.to_numeric(
+                    series.astype(str).str.replace(',', '.', regex=False),
+                    errors='raise'
                 )
-            else:
-                new_cols[col] = pd.Series(
-                    series.astype(str).values,
-                    dtype='object',
-                    index=df.index
-                )
+                new_data[col] = np.array(converted, dtype=np.float64)
+            except (ValueError, TypeError):
+                new_data[col] = np.array(series.astype(str), dtype=object)
 
-        # 6. Reconstruction finale avec des arrays NumPy purs
-        df = pd.DataFrame(new_cols, index=df.index, copy=False)
-
-        # 7. Suppression des colonnes vides
-        df = df.dropna(axis=1, how='all')
-
-        return df
+        df_clean = pd.DataFrame(new_data, index=df.index)
+        df_clean = df_clean.dropna(axis=1, how='all')
+        return df_clean
     except Exception as e:
         st.error(f"❌ Erreur de lecture : {e}")
         return None
@@ -209,7 +161,7 @@ def call_ai(prompt, provider, gemini_key=None, groq_key=None,
         return f"❌ Erreur : {str(e)}"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  NOMS DES MESURES MORPHOMÉTRIQUES
+#  LABELS DES MESURES
 # ══════════════════════════════════════════════════════════════════════════════
 MORPHO_LABELS = {
     'HW': 'Hauteur au garrot (cm)',
@@ -228,10 +180,9 @@ MORPHO_LABELS = {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  FONCTIONS D'ANALYSE
+#  FONCTIONS D'ANALYSE (100% NumPy)
 # ══════════════════════════════════════════════════════════════════════════════
 def compute_morphometric_indices(df):
-    """Calcule les indices morphométriques classiques."""
     df = df.copy()
     if 'BL' in df.columns and 'HW' in df.columns:
         df['Indice_format'] = (df['BL'] / df['HW'] * 100).round(2)
@@ -248,21 +199,20 @@ def compute_morphometric_indices(df):
     return df
 
 def analyze_sexual_dimorphism(df, morpho_cols, sex_col='SEX'):
-    """Compare mâles et femelles pour chaque mesure."""
     results = []
     for col in morpho_cols:
-        males = df[df[sex_col] == 'M'][col].dropna()
-        females = df[df[sex_col] == 'F'][col].dropna()
+        males = df[df[sex_col] == 'M'][col].dropna().values.astype(np.float64)
+        females = df[df[sex_col] == 'F'][col].dropna().values.astype(np.float64)
         if len(males) >= 2 and len(females) >= 2:
             try:
                 stat, p = mannwhitneyu(males, females, alternative='two-sided')
-                diff_pct = (males.mean() - females.mean()) / females.mean() * 100
+                diff_pct = (np.mean(males) - np.mean(females)) / np.mean(females) * 100
                 results.append({
                     'Mesure': col,
-                    'Mâles (moy)': round(males.mean(), 2),
-                    'Femelles (moy)': round(females.mean(), 2),
-                    'Différence (%)': round(diff_pct, 2),
-                    'p-value': round(p, 4),
+                    'Mâles (moy)': round(float(np.mean(males)), 2),
+                    'Femelles (moy)': round(float(np.mean(females)), 2),
+                    'Différence (%)': round(float(diff_pct), 2),
+                    'p-value': round(float(p), 4),
                     'Significatif': '✅' if p < 0.05 else '❌'
                 })
             except:
@@ -270,18 +220,18 @@ def analyze_sexual_dimorphism(df, morpho_cols, sex_col='SEX'):
     return pd.DataFrame(results)
 
 def analyze_breed_differences(df, morpho_cols, breed_col='BREED'):
-    """Compare les races par Kruskal-Wallis."""
     results = []
     for col in morpho_cols:
-        groups = [df[df[breed_col] == b][col].dropna().values for b in df[breed_col].unique()]
+        groups = [df[df[breed_col] == b][col].dropna().values.astype(np.float64) 
+                  for b in df[breed_col].unique()]
         groups = [g for g in groups if len(g) >= 2]
         if len(groups) >= 2:
             try:
                 stat, p = kruskal(*groups)
                 results.append({
                     'Mesure': col,
-                    'H (Kruskal)': round(stat, 2),
-                    'p-value': round(p, 4),
+                    'H (Kruskal)': round(float(stat), 2),
+                    'p-value': round(float(p), 4),
                     'Significatif': '✅' if p < 0.05 else '❌'
                 })
             except:
@@ -289,16 +239,19 @@ def analyze_breed_differences(df, morpho_cols, breed_col='BREED'):
     return pd.DataFrame(results)
 
 def compute_allometric_regression(df, x_col, y_col):
-    """Régression allométrique log(y) = a * log(x) + b."""
     data = df[[x_col, y_col]].dropna()
-    data = data[(data[x_col] > 0) & (data[y_col] > 0)]
-    if len(data) < 5:
+    x_vals = data[x_col].values.astype(np.float64)
+    y_vals = data[y_col].values.astype(np.float64)
+    mask = (x_vals > 0) & (y_vals > 0)
+    x_vals = x_vals[mask]
+    y_vals = y_vals[mask]
+    if len(x_vals) < 5:
         return None
-    log_x = np.log(data[x_col].values.astype('float64'))
-    log_y = np.log(data[y_col].values.astype('float64'))
+    log_x = np.log(x_vals)
+    log_y = np.log(y_vals)
     coeffs = np.polyfit(log_x, log_y, 1)
     r = np.corrcoef(log_x, log_y)[0, 1]
-    return {'slope': coeffs[0], 'intercept': coeffs[1], 'r': r, 'n': len(data)}
+    return {'slope': coeffs[0], 'intercept': coeffs[1], 'r': r, 'n': len(x_vals)}
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  APPLICATION PRINCIPALE
@@ -396,8 +349,9 @@ def main():
 
             if 'BREED' in df.columns:
                 st.markdown("### 📊 Répartition des races")
-                breed_counts = df['BREED'].value_counts().reset_index()
-                breed_counts.columns = ['Race', 'Nombre']
+                breeds_unique, counts = np.unique(df['BREED'].values.astype(str), return_counts=True)
+                breed_counts = pd.DataFrame({'Race': breeds_unique, 'Nombre': counts})
+                breed_counts = breed_counts.sort_values('Nombre', ascending=False)
                 fig = px.bar(breed_counts, x='Race', y='Nombre', color='Race',
                              template='plotly_dark', title="Nombre de chiens par race")
                 st.plotly_chart(fig, use_container_width=True, key="accueil_breed")
@@ -423,23 +377,30 @@ def main():
 
             if 'BREED' in df.columns:
                 st.markdown("### 🐕 Statistiques par race")
-                # CORRECTION FINALE : utiliser apply pour éviter pyarrow
-                breed_stats = df.groupby('BREED')[morpho_cols].apply(
-                    lambda x: pd.Series({
-                        'mean': x.mean().mean(),
-                        'std': x.std().mean()
-                    })
-                ).round(2)
+                rows = []
+                for breed in df['BREED'].unique():
+                    sub = df[df['BREED'] == breed]
+                    row = {'Race': breed}
+                    for col in morpho_cols:
+                        vals = sub[col].dropna().values.astype(np.float64)
+                        row[f'{col}_mean'] = round(float(np.mean(vals)), 2) if len(vals) > 0 else np.nan
+                        row[f'{col}_std'] = round(float(np.std(vals)), 2) if len(vals) > 0 else np.nan
+                    rows.append(row)
+                breed_stats = pd.DataFrame(rows).set_index('Race')
                 st.dataframe(breed_stats, use_container_width=True)
 
             if 'SEX' in df.columns:
                 st.markdown("### ♂♀ Statistiques par sexe")
-                sex_stats = df.groupby('SEX')[morpho_cols].apply(
-                    lambda x: pd.Series({
-                        'mean': x.mean().mean(),
-                        'std': x.std().mean()
-                    })
-                ).round(2)
+                rows = []
+                for sex in df['SEX'].unique():
+                    sub = df[df['SEX'] == sex]
+                    row = {'Sexe': sex}
+                    for col in morpho_cols:
+                        vals = sub[col].dropna().values.astype(np.float64)
+                        row[f'{col}_mean'] = round(float(np.mean(vals)), 2) if len(vals) > 0 else np.nan
+                        row[f'{col}_std'] = round(float(np.std(vals)), 2) if len(vals) > 0 else np.nan
+                    rows.append(row)
+                sex_stats = pd.DataFrame(rows).set_index('Sexe')
                 st.dataframe(sex_stats, use_container_width=True)
 
             st.markdown("### 📦 Distribution")
@@ -515,13 +476,26 @@ Interprète les différences et leur importance pour la sélection."""
                              use_container_width=True)
 
                 st.markdown("### 📊 Profil morphologique par race (Radar)")
-                breed_means = df.groupby('BREED')[morpho_cols].mean()
-                breed_norm = (breed_means - breed_means.min()) / (breed_means.max() - breed_means.min())
+                breeds = list(df['BREED'].unique())
+                means_dict = {}
+                for breed in breeds:
+                    sub = df[df['BREED'] == breed]
+                    means_dict[breed] = [
+                        float(np.mean(sub[c].dropna().values.astype(np.float64)))
+                        if len(sub[c].dropna()) > 0 else 0.0
+                        for c in morpho_cols
+                    ]
+                breed_means = pd.DataFrame(means_dict, index=morpho_cols).T
+
+                mins = breed_means.min()
+                maxs = breed_means.max()
+                ranges = (maxs - mins).replace(0, 1)
+                breed_norm = (breed_means - mins) / ranges
 
                 fig_radar = go.Figure()
                 for breed in breed_norm.index:
                     fig_radar.add_trace(go.Scatterpolar(
-                        r=breed_norm.loc[breed].values.astype('float64'),
+                        r=breed_norm.loc[breed].values.astype(np.float64),
                         theta=[MORPHO_LABELS.get(c, c) for c in morpho_cols],
                         fill='toself', name=breed
                     ))
@@ -581,8 +555,10 @@ Interprète les différences et leur importance pour la sélection."""
             if len(morpho_cols) < 2:
                 st.warning("Il faut au moins 2 mesures.")
             else:
-                # CORRECTION : forcer float64 numpy
-                X = df[morpho_cols].fillna(df[morpho_cols].mean()).values.astype('float64')
+                X = np.array(df[morpho_cols].values, dtype=np.float64)
+                col_means = np.nanmean(X, axis=0)
+                nan_mask = np.isnan(X)
+                X[nan_mask] = np.take(col_means, np.where(nan_mask)[1])
                 X_scaled = StandardScaler().fit_transform(X)
 
                 st.markdown("### 📉 PCA")
@@ -707,10 +683,15 @@ Interprète les différences et leur importance pour la sélection."""
                 method = st.selectbox("Méthode", ['pearson', 'spearman'], key="corr_meth")
 
             if c1 != c2:
+                x_vals = df[c1].dropna().values.astype(np.float64)
+                y_vals = df[c2].dropna().values.astype(np.float64)
+                min_len = min(len(x_vals), len(y_vals))
+                x_vals = x_vals[:min_len]
+                y_vals = y_vals[:min_len]
                 if method == 'pearson':
-                    r, p = pearsonr(df[c1].dropna(), df[c2].dropna())
+                    r, p = pearsonr(x_vals, y_vals)
                 else:
-                    r, p = spearmanr(df[c1].dropna(), df[c2].dropna())
+                    r, p = spearmanr(x_vals, y_vals)
                 st.metric(f"Corrélation {method}", f"r = {r:.3f}", delta=f"p = {p:.4f}")
                 fig_sc = px.scatter(df, x=c1, y=c2,
                                     color='BREED' if 'BREED' in df.columns else None,
@@ -752,7 +733,7 @@ Interprète les différences et leur importance pour la sélection."""
                     try:
                         from statsmodels.formula.api import ols
                         import statsmodels.api as sm
-                        data = df[[p_col, g_col, e_col]].dropna().astype('float64')
+                        data = df[[p_col, g_col, e_col]].dropna().astype(np.float64)
                         data.columns = ['P', 'G', 'E']
                         if len(data) >= 10:
                             model = ols('P ~ G + E + G:E', data=data).fit()
@@ -795,12 +776,25 @@ Interprète les différences et leur importance pour la sélection."""
                 height=120, key="ai_prompt_morpho")
 
             if st.button("🤖 Interroger l'IA", key="ai_btn_morpho"):
+                race_summary = ""
+                if 'BREED' in df.columns:
+                    for breed in df['BREED'].unique():
+                        sub = df[df['BREED'] == breed]
+                        means = []
+                        for c in morpho_cols:
+                            vals = sub[c].dropna().values.astype(np.float64)
+                            if len(vals) > 0:
+                                means.append(f"{c}={np.mean(vals):.2f}")
+                            else:
+                                means.append(f"{c}=N/A")
+                        race_summary += f"{breed}: {', '.join(means)}\n"
+
                 context = f"""
                 Données morphométriques canines : {len(df)} chiens
-                Races : {df['BREED'].value_counts().to_dict() if 'BREED' in df.columns else 'N/A'}
-                Sexes : {df['SEX'].value_counts().to_dict() if 'SEX' in df.columns else 'N/A'}
+                Races : {dict(zip(*np.unique(df['BREED'].values.astype(str), return_counts=True))) if 'BREED' in df.columns else 'N/A'}
+                Sexes : {dict(zip(*np.unique(df['SEX'].values.astype(str), return_counts=True))) if 'SEX' in df.columns else 'N/A'}
                 Moyennes par race :
-                {df.groupby('BREED')[morpho_cols].mean().round(2).to_string() if 'BREED' in df.columns else 'N/A'}
+                {race_summary}
                 """
                 full_prompt = f"{context}\n\nQuestion : {prompt_user}"
                 with st.spinner("Analyse IA..."):
@@ -839,7 +833,7 @@ Interprète les différences et leur importance pour la sélection."""
         - Statistiques descriptives
         - Dimorphisme sexuel (Mann-Whitney)
         - Différences raciales (Kruskal-Wallis + Radar)
-        - Indices morphométriques (format, poitrine, céphalique, masse)
+        - Indices morphométriques
         - PCA & LDA
         - Allométrie (régression log-log)
         - Corrélations + clustering
